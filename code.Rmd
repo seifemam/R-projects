@@ -1,0 +1,283 @@
+---
+title: "final_Project"
+author: "Seif Emam"
+date: "10/11/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)  ## package for model comparisons
+library(glmnet) ## package for fitting lasso models
+library(mgcv)  
+library(plotly)
+library(tidyr)
+library(dplyr)
+library(factoextra)
+library(cluster)
+library(ggplot2)
+library(klaR)
+
+```
+
+#Cleaning and loading
+```{r}
+#loading the dataset
+powerlift<-read.csv("openpowerlifting-2020-09-06.csv")
+```
+```{r}
+#getting rid of the Na's in key columns
+powerlift<-powerlift[!is.na(powerlift$TotalKg),]
+powerlift<-powerlift[!is.na(powerlift$Best3SquatKg),]
+powerlift<-powerlift[!is.na(powerlift$Best3BenchKg),]
+powerlift<-powerlift[!is.na(powerlift$Best3DeadliftKg),]
+powerlift<-powerlift[!is.na(powerlift$Equipment),]
+with_age<-powerlift[!is.na(powerlift$Age),]
+#converting the Na to No per the description in the dataset documentation
+with_age[with_age$Tested!="Yes",]$Tested<-"No"
+
+```
+
+```{r}
+#filtering by date to get results in 2020 only
+with_age$Date <-as.factor(with_age$Date)
+with_age$Date<-strptime(with_age$Date,format="%Y-%m-%d")
+with_age$Date <-as.Date(with_age$Date,format="%Y-%m-%d")
+with_age<-with_age[with_age$Sex!="Mx",]
+after20<-with_age[with_age$Date>as.Date("2020-01-01"),]
+
+```
+
+
+
+
+#expalratory data analysis
+
+```{r}
+#plotting Total weight (S+B+D ) vs Age colored by whether or not it's tested
+ggplot(with_age,aes(x=Age, y=TotalKg, color=Tested))+geom_point()+ggtitle("TotalKG (S+B+D) VS Age coloured by testing")
+```
+# looks like the peak of lifting happens around the age of 25-30 and it looks liket the the heaviest lifts happen with the multiply
+
+```{r}
+# histogram of number of competitors per year
+ggplot(with_age,aes(x=Date))+geom_histogram()+ggtitle("count of powerlifting competetors")
+```
+```{r}
+#Total weight vs sex of the competitor
+ggplot(with_age,aes(x=Sex,y=TotalKg))+geom_boxplot()+ggtitle("Sex of competetor vs Total (B+S+D) in Kg")
+```
+
+
+
+
+
+##creating the models to get variable importance
+
+```{r}
+#let's specify our number of folds
+fit.control <- trainControl(method = "repeatedcv", number = 5, repeats = 10)
+#let's first scale the data before training it
+std_after<-after20[,c("Best3DeadliftKg","Best3BenchKg","Best3SquatKg","TotalKg","Age","BodyweightKg","Sex","Equipment","Tested")]
+#we will reduce the equipment to include 3 factors instead of 5.
+std_after[std_after$Equipment=="Single-ply" |std_after$Equipment=="Multi-ply"|std_after$Equipment=="Unlimited",]$Equipment<-"suits_more"
+#scaling
+std_after<-na.omit(std_after)
+std_after$TotalKg<-scale(std_after$TotalKg)
+std_after$Age<-scale(std_after$Age)
+std_after$BodyweightKg<-scale(std_after$BodyweightKg)
+X_ = model.matrix(data = std_after[,5:9], ~-1+ .) ## Set up the matrix for Lasso including dummy vars
+y_ = std_after$TotalKg
+# test the linear model and the lasso on total and see which one is better through cross validation
+lasso <- glmnet(x = X_, y = y_)
+lams <- expand.grid(alpha = 1, lambda = lasso$lambda)
+set.seed(123)
+#lasso model
+fit.lasso_total <- train(TotalKg~Age+BodyweightKg+Sex+Equipment+Tested, data = std_after, method = "glmnet", trControl = fit.control, tuneGrid = lams)
+#linear model
+model_ln_total <- train(TotalKg~Age+BodyweightKg+Sex+Equipment+Tested, data=std_after, method="lm", trControl=fit.control)
+resamps_total <- resamples(list(LM1 = model_ln_total,Lasso=fit.lasso_total))
+#showing the cross validation table
+summary(resamps_total)
+```
+
+
+```{r}
+# getting the variable importances using Var imp function
+importance_total <- varImp(fit.lasso_total, scale=FALSE)
+
+# printing the coeffecients of the model
+coef(fit.lasso_total$finalModel, s = fit.lasso_total$bestTune$lambda)
+# plot importance
+plot(importance_total)
+```
+
+```{r}
+#test the linear model and the lasso on squats and see which one is better through cross validation
+X_ = model.matrix(data = std_after[,5:9], ~-1+ .) ## Set up the matrix including dummy vars
+y_ = std_after$Best3SquatKg
+#the lasso model
+lasso <- glmnet(x = X_, y = y_)
+lams <- expand.grid(alpha = 1, lambda = lasso$lambda)
+set.seed(123)
+fit.lasso_squat <- train(Best3SquatKg~Age+BodyweightKg+Sex+Equipment+Tested, data = std_after, method = "glmnet", trControl = fit.control, tuneGrid = lams)
+#the linear model
+model_ln_squat <- train(Best3SquatKg~Age+BodyweightKg+Sex+Equipment+Tested, data=std_after, method="lm", trControl=fit.control, na.action = na.exclude)
+resamps <- resamples(list(LM1 = model_ln_squat,lasso=fit.lasso_squat))
+#print the cross validation
+summary(resamps)
+```
+```{r}
+#we will plot the feature selection visual using the lasso model
+importance_squat <- varImp(fit.lasso_squat, scale=FALSE)
+# print coeffecients of lasso
+coef(fit.lasso_squat$finalModel, s = fit.lasso_squat$bestTune$lambda)
+# plot importance
+plot(importance_squat)
+```
+
+```{r}
+##test the linear model and the lasso on Bench and see which one is better through cross validation
+X_ = model.matrix(data = std_after[,5:9], ~-1+ .) 
+y_ = std_after$Best3BenchKg
+lasso <- glmnet(x = X_, y = y_)
+lams <- expand.grid(alpha = 1, lambda = lasso$lambda)
+set.seed(123)
+#lasso
+fit.lasso_bench <- train(Best3BenchKg~Age+BodyweightKg+Sex+Equipment+Tested, data = std_after, method = "glmnet", trControl = fit.control, tuneGrid = lams)
+#linear model
+model_ln_bench <- train(Best3BenchKg~Age+BodyweightKg+Sex+Equipment+Tested, data=std_after, method="lm", trControl=fit.control, na.action = na.exclude)
+
+resamps <- resamples(list(LM1 = model_ln_bench,lasso=fit.lasso_bench))
+summary(resamps)
+```
+```{r}
+
+#we will plot the feature selection visual using the lasso model
+importance_bench <- varImp(fit.lasso_bench, scale=FALSE)
+# print coeffecients 
+coef(fit.lasso_bench$finalModel, s = fit.lasso_bench$bestTune$lambda)
+# plot importance
+plot(importance_bench)
+```
+
+
+```{r}
+##test the linear model and the lasso on deadlift and see which one is better through cross validation
+X_ = model.matrix(data = std_after[,5:9], ~-1+ .) 
+y_ = std_after$Best3DeadliftKg
+lasso <- glmnet(x = X_, y = y_)
+lams <- expand.grid(alpha = 1, lambda = lasso$lambda)
+set.seed(123)
+#lasso
+fit.lasso_Deadlift <- train(Best3DeadliftKg~Age+BodyweightKg+Sex+Equipment+Tested, data = std_after, method = "glmnet", trControl = fit.control, tuneGrid = lams)
+#linear model
+model_ln_deadlift <- train(Best3DeadliftKg~BodyweightKg+Sex+Equipment+Tested, data=std_after, method="lm", trControl=fit.control, na.action = na.exclude)
+resamps <- resamples(list(LM1 = model_ln_deadlift,lasso=fit.lasso_Deadlift))
+summary(resamps)
+```
+```{r}
+#we will plot the feature selection visual using the lasso model 
+importance_Deadlift <- varImp(fit.lasso_Deadlift, scale=FALSE)
+# plotting coeffecients
+summary(fit.lasso_Deadlift)
+# plot importance
+plot(importance_Deadlift)
+```
+
+
+
+
+
+
+##clustering and weight classes
+
+
+
+```{r}
+#making a data frame for clustering using the columns shown below only
+for_cluster<-after20[, c("Age", "BodyweightKg","Equipment","Best3SquatKg","Best3BenchKg","Best3DeadliftKg","TotalKg","Sex","WeightClassKg","Tested")]
+#removing NA values
+for_cluster$WeightClassKg<-na.omit(for_cluster$WeightClassKg)
+#converting weight class column to numeric so that we can create our new WC column based on its values
+for_cluster$WeightClassKg<-as.numeric(for_cluster$WeightClassKg)
+#filtering the data frame into 2 other data frames based on sex
+for_cluster_M<-for_cluster[for_cluster$Sex=='M',]
+for_cluster_F<-for_cluster[for_cluster$Sex=='F',]
+#creating new weightclasses for males around 83 and 105 Kg
+for_cluster_M<-mutate(for_cluster_M,comp_WC=ifelse(for_cluster_M$WeightClassKg<=83,83,ifelse(for_cluster_M$BodyweightKg<=105,105,150)))
+#creating new weightclasses for females around 63 and 72 Kg
+for_cluster_F<-mutate(for_cluster_F,comp_WC=ifelse(for_cluster_F$WeightClassKg<=63,63,ifelse(for_cluster_F$BodyweightKg<=72,72,100)))
+# Converting the data type to Character so that we can give the weight classes more descriptive labels
+for_cluster_M$comp_WC<-as.character(for_cluster_M$comp_WC)
+for_cluster_F$comp_WC<-as.character(for_cluster_F$comp_WC)
+for_cluster_M<-na.omit(for_cluster_M)
+for_cluster_F<-na.omit(for_cluster_F)
+#labeling the new weight classes light, med, and heavy weight
+#males
+for_cluster_M[for_cluster_M$comp_WC=="83",]$comp_WC<-"light_weight"
+for_cluster_M[for_cluster_M$comp_WC=="105",]$comp_WC<-"med_weight"
+for_cluster_M[for_cluster_M$comp_WC=="150",]$comp_WC<-"heavy_weight"
+#females
+for_cluster_F[for_cluster_F$comp_WC=="63",]$comp_WC<-"light_weight"
+for_cluster_F[for_cluster_F$comp_WC=="72",]$comp_WC<-"med_weight"
+for_cluster_F[for_cluster_F$comp_WC=="100",]$comp_WC<-"heavy_weight"
+# converting them to factor so that we can do the clustering
+for_cluster_M$comp_WC<-factor(for_cluster_M$comp_WC,levels=c("light_weight","med_weight","heavy_weight"))
+for_cluster_F$comp_WC<-factor(for_cluster_F$comp_WC,levels=c("light_weight","med_weight","heavy_weight"))
+```
+
+```{r}
+# showing a histogram of the count of each new weight class
+ggplot(for_cluster_M,aes(x=comp_WC))+geom_histogram(stat="count")+ggtitle("Male weight classes count")
+ggplot(for_cluster_F,aes(x=comp_WC))+geom_histogram(stat="count")+ggtitle("Female weight classes count")
+```
+
+
+
+
+
+```{r}
+
+#doing the pam clustering for Male dataset
+set.seed(123)
+pam_pol <- pam(for_cluster_M[,c("Age","BodyweightKg", "Equipment","Best3SquatKg","Best3BenchKg","Best3DeadliftKg","TotalKg","Sex","Tested")], k=3)
+#getting the clusters to become separate data frames
+c1 <- filter(for_cluster_M, pam_pol$clustering == "1")
+c2 <- filter(for_cluster_M, pam_pol$clustering == "2")
+c3 <- filter(for_cluster_M, pam_pol$clustering == "3")
+#getting the count of each weight class in each cluster
+c1_cluster <- summary(c1$comp_WC)
+c2_cluster<- summary(c2$comp_WC)
+c3_cluster <- summary(c3$comp_WC)
+#combining everything together
+totaltally <- rbind(c1_cluster, c2_cluster, c3_cluster)
+#printing the table of clusters vs count of each weight class
+totaltally
+```
+```{r}
+
+
+
+#doing the pam clustering for Females dataset
+set.seed(123)
+pam_pol <- pam(for_cluster_F[,c("Age","BodyweightKg", "Equipment","Best3SquatKg","Best3BenchKg","Best3DeadliftKg","TotalKg","Sex")], k=3)
+#getting the clusters to become separate data frames
+c1 <- filter(for_cluster_F, pam_pol$clustering == "1")
+c2 <- filter(for_cluster_F, pam_pol$clustering == "2")
+c3 <- filter(for_cluster_F, pam_pol$clustering == "3")
+#getting the count of each weight class in each cluster
+c1_cluster <- summary(c1$comp_WC)
+c2_cluster<- summary(c2$comp_WC)
+c3_cluster <- summary(c3$comp_WC)
+#combining everything together
+totaltally <- rbind(c1_cluster, c2_cluster, c3_cluster)
+#printing the table of clusters vs count of each weight class
+totaltally
+```
+```
+
+
+
+
+
